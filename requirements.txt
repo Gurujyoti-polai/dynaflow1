@@ -1,9 +1,20 @@
-fastapi>=0.115.5
-uvicorn[standard]>=0.32.1
-langgraph>=0.2.50
-langchain-google-genai>=2.0.4
-langchain-core>=0.3.15
-python-dotenv>=1.0.1
-pydantic>=2.9.2
-httpx>=0.27.2
-google-generativeai>=0.8.3
+# requirements.txt - SIMPLIFIED
+
+# Core
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+python-dotenv==1.0.1
+
+# LLM
+google-generativeai==0.8.3
+
+# HTTP client
+httpx==0.27.2
+
+# Storage
+# (SQLite is built-in to Python)
+
+# That's it! Much simpler.
+# Removed: langgraph, notion-client, github, slack-sdk, etc.
+# ReAct agent calls APIs directly via httpx

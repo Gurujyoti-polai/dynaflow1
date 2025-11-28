@@ -1,161 +1,145 @@
+# api/main.py - SIMPLIFIED VERSION
+"""
+DynaFlow API - ReAct Agent Only
+Clean, simple, powerful
+"""
+
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import Optional, List
-from core.planner import parse_prompt_to_plan
-from core.executor import build_and_run
+from typing import Optional, Any, List, Dict
+from core.react_agent import ReActAgent
 from core.storage import get_storage
-from core.plugins.registry import plugin_registry
-from core.visualizer import generate_mermaid, generate_ascii_flow
 from core.config import Config
-from core.schemas import WorkflowPlan
 import logging
+from datetime import datetime
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dynaflow")
 
 # Initialize
 storage = get_storage()
-plugin_registry.load_from_directory(Config.PLUGINS_DIR)
+app = FastAPI(
+    title="DynaFlow - AI Workflow Automation",
+    description="Turn natural language into automated workflows using ReAct agent"
+)
 
-app = FastAPI(title="DynaFlow Phase 2 - Universal Workflow Engine")
+class WorkflowRequest(BaseModel):
+    goal: str  # Natural language goal
+    save: bool = False  # Save execution history
 
-class ExecRequest(BaseModel):
-    prompt: str
-    mode: Optional[str] = None  # real or mock
-    save: bool = False
-
-class RunWorkflowRequest(BaseModel):
-    workflow_id: str
-    mode: Optional[str] = None
+class WorkflowResponse(BaseModel):
+    execution_id: str
+    status: str
+    result: Any  # Changed from 'any' to 'Any'
+    iterations: int
+    trace: List[Dict[str, Any]]  # Changed from 'list' to 'List[Dict[str, Any]]'
+    error: Optional[str] = None
 
 @app.get("/")
 async def root():
     return {
-        "message": "DynaFlow Phase 2",
+        "name": "DynaFlow",
+        "version": "2.0 (ReAct)",
+        "description": "AI-powered workflow automation using ReAct agent",
         "features": [
-            "✅ Mock/Real mode toggling",
-            "✅ Persistent storage (SQLite)",
-            "✅ Visual flow diagrams",
-            "✅ Dynamic plugin loading"
+            "✅ Natural language to workflows",
+            "✅ Self-correcting execution",
+            "✅ Adaptive decision making",
+            "✅ No manual plugin coding needed"
         ],
-        "plugins": list(plugin_registry.list_plugins().keys())
+        "endpoints": {
+            "/execute": "Execute a workflow from natural language",
+            "/executions/{id}": "Get execution history",
+            "/health": "Health check"
+        }
     }
 
-@app.post("/execute")
-async def execute(req: ExecRequest):
-    try:
-        logger.info(f"📝 Prompt: {req.prompt}")
-        
-        plan = parse_prompt_to_plan(req.prompt)
-        plan.mode = req.mode or Config.DEFAULT_MODE
-        
-        if req.save:
-            workflow_id = storage.save_workflow(plan)
-            plan.workflow_id = workflow_id
-            logger.info(f"💾 Saved workflow: {workflow_id}")
-        
-        execution = build_and_run(plan)
-        
-        if execution.workflow_id != "adhoc":
-            storage.save_execution(execution)
-        
-        return {
-            "status": execution.status,
-            "execution_id": execution.execution_id,
-            "workflow_id": plan.workflow_id,
-            "mode": plan.mode,
-            "plan": plan.model_dump(),
-            "result": execution.step_results,
-            "error": execution.error
+@app.post("/execute", response_model=WorkflowResponse)
+async def execute_workflow(req: WorkflowRequest):
+    """
+    Execute a workflow using ReAct agent
+    
+    Example:
+        {
+          "goal": "Get Mumbai weather and add to my Notion database",
+          "save": true
         }
+    """
+    execution_id = str(uuid.uuid4())
+    
+    try:
+        logger.info(f"🎯 Executing: {req.goal}")
+        
+        # Create agent and execute
+        agent = ReActAgent()
+        result = agent.execute_workflow(req.goal)
+        
+        # Build response
+        response = WorkflowResponse(
+            execution_id=execution_id,
+            status=result['status'],
+            result=result.get('result'),
+            iterations=result.get('iterations', 0),
+            trace=result.get('trace', []),
+            error=result.get('error')
+        )
+        
+        # Save if requested
+        if req.save:
+            from core.schemas import WorkflowExecution
+            execution_record = WorkflowExecution(
+                execution_id=execution_id,
+                goal=req.goal,
+                status=result['status'],
+                started_at=datetime.now(),
+                completed_at=datetime.now(),
+                result=result.get('result'),
+                iterations=result.get('iterations', 0),
+                trace=result.get('trace', []),
+                error=result.get('error')
+            )
+            storage.save_execution(execution_record)
+            logger.info(f"💾 Saved execution: {execution_id}")
+        
+        return response
     
     except Exception as e:
-        logger.exception("Error")
+        logger.exception("Error executing workflow")
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/workflows")
-async def list_workflows(tags: Optional[str] = None):
-    tag_list = tags.split(",") if tags else None
-    workflows = storage.list_workflows(tag_list)
-    return {"workflows": [w.model_dump() for w in workflows]}
-
-@app.get("/workflows/{workflow_id}")
-async def get_workflow(workflow_id: str):
-    workflow = storage.get_workflow(workflow_id)
-    if not workflow:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    return workflow.model_dump()
-
-@app.post("/workflows/{workflow_id}/run")
-async def run_saved_workflow(workflow_id: str, req: RunWorkflowRequest):
-    workflow = storage.get_workflow(workflow_id)
-    if not workflow:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    
-    workflow.mode = req.mode or workflow.mode
-    execution = build_and_run(workflow)
-    storage.save_execution(execution)
-    
-    return {
-        "status": execution.status,
-        "execution_id": execution.execution_id,
-        "result": execution.step_results,
-        "error": execution.error
-    }
-
-@app.get("/workflows/{workflow_id}/visualize")
-async def visualize_workflow(workflow_id: str, format: str = "ascii"):
-    workflow = storage.get_workflow(workflow_id)
-    if not workflow:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    
-    if format == "mermaid":
-        return {"diagram": generate_mermaid(workflow)}
-    else:
-        return {"diagram": generate_ascii_flow(workflow)}
-
-@app.get("/workflows/{workflow_id}/diagram", response_class=HTMLResponse)
-async def workflow_diagram(workflow_id: str):
-    workflow = storage.get_workflow(workflow_id)
-    if not workflow:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    
-    mermaid_code = generate_mermaid(workflow)
-    
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>{workflow.name} - Flow Diagram</title>
-        <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
-    </head>
-    <body>
-        <h1>{workflow.name}</h1>
-        <p>{workflow.description}</p>
-        <div class="mermaid">
-        {mermaid_code}
-        </div>
-        <script>mermaid.initialize({{startOnLoad:true}});</script>
-    </body>
-    </html>
-    """
-    return html
-
-@app.get("/plugins")
-async def list_plugins():
-    return plugin_registry.list_plugins()
 
 @app.get("/executions/{execution_id}")
 async def get_execution(execution_id: str):
+    """Get execution history by ID"""
     execution = storage.get_execution(execution_id)
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found")
-    return execution.model_dump()
+    return execution
 
-@app.delete("/workflows/{workflow_id}")
-async def delete_workflow(workflow_id: str):
-    success = storage.delete_workflow(workflow_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    return {"status": "deleted"}
+@app.get("/executions")
+async def list_executions(limit: int = 10):
+    """List recent executions"""
+    executions = storage.list_executions(limit)
+    return {"executions": executions, "count": len(executions)}
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "config": {
+            "gemini_api_key": "✓" if Config.GOOGLE_API_KEY else "✗",
+            "storage": Config.STORAGE_TYPE
+        }
+    }
+
+# Optional: Keep backward compatibility
+@app.post("/react/execute")
+async def execute_react_legacy(req: WorkflowRequest):
+    """Legacy endpoint - redirects to /execute"""
+    return await execute_workflow(req)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host=Config.API_HOST, port=Config.API_PORT)

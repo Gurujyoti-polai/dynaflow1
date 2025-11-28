@@ -1,0 +1,6 @@
+# Add to .gitignore so it never gets committed again
+echo ".env" >> .gitignore
+echo ".env.old" >> .gitignore
+.env
+.env.*
+backup_*/

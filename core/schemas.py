@@ -1,29 +1,23 @@
+# core/schemas.py - SIMPLIFIED
+"""
+Minimal schemas for ReAct-based DynaFlow
+"""
+
 from pydantic import BaseModel, Field
-from typing import List, Dict, Optional, Any, Literal
+from typing import Optional, Any, Dict, List
 from datetime import datetime
 
-class ActionStep(BaseModel):
-    step_id: str
-    step_type: Literal["http_request", "transform", "condition", "loop", "wait", "plugin", "custom"]
-    description: str
-    config: Dict[str, Any] = Field(default_factory=dict)
-    depends_on: Optional[List[str]] = None
-    plugin_name: Optional[str] = None  # For plugin steps
-
-class WorkflowPlan(BaseModel):
-    workflow_id: Optional[str] = None
-    name: str
-    description: str
-    steps: List[ActionStep]
-    created_at: Optional[datetime] = None
-    mode: Literal["real", "mock"] = "real"
-    tags: List[str] = Field(default_factory=list)
-
 class WorkflowExecution(BaseModel):
+    """Record of a workflow execution"""
     execution_id: str
-    workflow_id: str
-    status: Literal["running", "success", "failed"]
+    goal: str
+    status: str  # "success", "failed", "max_iterations"
     started_at: datetime
     completed_at: Optional[datetime] = None
-    step_results: Dict[str, Any] = Field(default_factory=dict)
+    result: Optional[Any] = None
+    iterations: int = 0
+    trace: List[Dict[str, Any]] = Field(default_factory=list)
     error: Optional[str] = None
+
+# That's it! No need for ActionStep, WorkflowPlan, etc.
+# ReAct agent handles everything dynamically
