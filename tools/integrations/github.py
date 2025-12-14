@@ -14,6 +14,10 @@ class GithubTool(ToolBase):
     @property
     def description(self) -> str:
         return "Performs GitHub operations like creating issues, PRs, repos, etc."
+    
+    @property
+    def category(self) -> str:
+        return "integration"
 
     # -------------------------------
     # MAIN EXECUTION ENTRYPOINT

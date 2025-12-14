@@ -43,6 +43,12 @@ class ToolRegistry:
         except Exception as e:
             print(f"⚠️  Failed to load NotionTool: {e}")
 
+        try:
+            from tools.integrations.github import GithubTool
+            self.register(GithubTool())
+        except Exception as e:
+            print(f"⚠️  Failed to load GithubTool: {e}")
+
     def get(self, name: str) -> Optional[ToolBase]:
         """Get tool by name"""
         return self._tools.get(name)

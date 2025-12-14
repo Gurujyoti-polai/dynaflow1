@@ -46,15 +46,6 @@ class ReActAgent:
         while iteration < self.max_iterations:
             iteration += 1
             print(f"\n--- Iteration {iteration} ---")
-
-            #  Check if we have weather data and should move to next step
-            if iteration > 1:
-                last_obs = self.conversation_history[-1].get('observation', {})
-                if isinstance(last_obs, dict) and last_obs.get('status') == 200:
-                    data = last_obs.get('data', {})
-                    if 'current_condition' in data and 'notion' in user_goal.lower():
-                        print("✅ Weather data obtained. Moving to Notion...")
-                        # Continue to let agent think about Notion
             
             # THINK
             thought = self._think(user_goal)
@@ -93,22 +84,12 @@ class ReActAgent:
                     print(f"❌ Error: {observation['error'][:100]}...")
                     if "fallback_suggestion" in observation:
                         print(f"💡 Suggestion: {observation['fallback_suggestion']}")
-                elif observation.get("status") == 401:
-                    print(f"🔒 Authentication failed - stopping retry loop")
-                    print(f"💡 Hint: Check NOTION_TOKEN and NOTION_DB_ID environment variables")
-                    return {
-                        "status": "auth_error",
-                        "result": "Authentication failed. Weather data retrieved successfully but could not add to Notion due to invalid credentials.",
-                        "iterations": iteration,
-                        "trace": self.conversation_history
-                    }
+                elif "number" in observation and "html_url" in observation:
+                    # GitHub issue created successfully
+                    print(f"✅✅✅ SUCCESS! GitHub issue created: #{observation.get('number')}")
+                    print(f"🔗 URL: {observation.get('html_url')}")
                 elif observation.get("status") == 200:
-                    data = observation.get("data", {})
-                    # Check if this is a successful Notion page creation
-                    if isinstance(data, dict) and data.get("object") == "page":
-                        print(f"✅✅✅ SUCCESS! Notion page created: {data.get('id')}")
-                        print(f"🎉 Task completed successfully!")
-                        # Force FINISH on next iteration by adding to history
+                    print(f"✅ HTTP 200 - Success")
                 elif observation.get("status") >= 400:
                     print(f"⚠️  HTTP {observation.get('status')} error")
                 else:
@@ -162,159 +143,116 @@ class ReActAgent:
         if len(text) != original_len:
             print(f"   Removed trailing commas")
         
-        # DON'T remove // comments - they might be part of URLs!
-        # Only remove comments that are clearly standalone (not in strings)
-        # For now, skip comment removal to avoid breaking URLs
-        
         result = text.strip()
         print(f"   Final cleaned ({len(result)} chars)")
         return result
     
-    def _extract_city_from_goal(self, goal: str) -> str:
-        """
-        Extract city name from user goal
-        Simple extraction - looks for common patterns
-        """
-        goal_lower = goal.lower()
-        
-        # Common patterns: "get X weather", "weather in X", "X weather"
-        patterns = [
-            r'(?:get|fetch|retrieve)\s+(\w+)\s+weather',
-            r'weather\s+(?:in|for|of)\s+(\w+)',
-            r'(\w+)\s+weather',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, goal_lower)
-            if match:
-                city = match.group(1).capitalize()
-                print(f"🌍 Extracted city: {city}")
-                return city
-        
-        # Default fallback
-        print(f"⚠️  Could not extract city, using Mumbai as default")
-        return "Mumbai"
-    
     def _think(self, user_goal: str) -> Dict[str, Any]:
         """
-        Agent reasons about what to do next
+        Agent reasons about what to do next - GENERIC VERSION
         """
         history_text = self._format_history()
         tool_manifest = self.tools.list_manifest()
         
-        # Extract city name from goal (simple extraction)
-        city = self._extract_city_from_goal(user_goal)
+        # Get GitHub token status
+        github_token = os.environ.get('GITHUB_TOKEN', '')
         
-        # Check if we have weather data
-        has_weather = False
-        weather_data = None
-        weather_temp = None
-        has_auth_error = False
-        notion_success = False
+        # Check what has been accomplished
+        task_completed = False
+        github_issue_created = False
+        last_result = None
         
         for entry in self.conversation_history:
             obs = entry.get('observation', {})
-            thought = entry.get('thought', {})
             
             if isinstance(obs, dict):
-                # Check for weather data
-                if obs.get('status') == 200:
-                    data = obs.get('data', {})
-                    if isinstance(data, dict) and 'current_condition' in data:
-                        has_weather = True
-                        weather_data = data
-                        try:
-                            weather_temp = int(data['current_condition'][0]['temp_C'])
-                        except (KeyError, IndexError, ValueError):
-                            weather_temp = 25
-                    # Check if this was a successful Notion POST
-                    elif 'object' in data and data.get('object') == 'page':
-                        notion_success = True
-                # Check for authentication errors
-                if obs.get('status') == 401:
-                    has_auth_error = True
-        
-        # Get environment variables
-        notion_token = os.environ.get('NOTION_TOKEN', '')
-        notion_db_id = os.environ.get('NOTION_DB_ID', '')
+                # Check if GitHub issue was created
+                if 'number' in obs and 'html_url' in obs and 'dynaflow' in str(obs.get('html_url', '')):
+                    github_issue_created = True
+                    task_completed = True
+                    last_result = obs
+                
+                # Check for errors
+                if 'error' in obs:
+                    last_result = obs
         
         prompt = f"""You are an AI agent that executes workflows. You must respond with ONLY valid JSON.
 
 USER GOAL: {user_goal}
-TARGET CITY: {city}
 
 {history_text}
 
 Available Tools:
 {tool_manifest}
 
-CURRENT STATUS:
-- Have weather data: {"YES ✓" if has_weather else "NO"}
-- Weather temperature: {weather_temp if weather_temp else "N/A"}°C
-- Notion credentials: {"CONFIGURED ✓" if notion_token and notion_db_id else "MISSING ⚠️"}
-- Notion POST success: {"YES ✓✓✓ ALREADY DONE - DO NOT REPEAT!" if notion_success else "NOT YET"}
-- Previous auth error: {"YES - STOP" if has_auth_error else "NO"}
+ENVIRONMENT STATUS:
+- GitHub Token: {"✓ CONFIGURED" if github_token else "✗ MISSING"}
 
-🚨 CRITICAL RULES - READ CAREFULLY:
-1. Look at "Previous Steps" above - if you see "✅ NOTION PAGE CREATED SUCCESSFULLY" → TASK IS DONE → Use FINISH action immediately
-2. NEVER POST to Notion twice - if it succeeded once, you're DONE
-3. If Notion POST failed with 401 → FINISH with error
-4. Only POST to Notion if you haven't already succeeded
+TASK ANALYSIS:
+Goal mentions: {"GitHub" if "github" in user_goal.lower() else "Weather" if "weather" in user_goal.lower() else "Notion" if "notion" in user_goal.lower() else "Unknown"}
+Task completed: {"YES - FINISH NOW!" if task_completed else "NO - Continue"}
+GitHub issue created: {"YES" if github_issue_created else "NO"}
 
-DECISION TREE:
-- Notion already succeeded? → FINISH (YOU'RE DONE!)
-- Have weather + got 401? → FINISH with error
-- Have weather + haven't tried Notion yet? → POST to Notion
-- Don't have weather? → GET weather for {city}
-- Otherwise? → FINISH
+🎯 DECISION LOGIC:
 
-YOUR NEXT ACTION:
-{"🎯 FINISH - You already created the Notion page successfully!" if notion_success else "🔒 FINISH - Auth failed" if has_auth_error else f"📤 POST to Notion (first attempt)" if has_weather and notion_token else f"🌤️ GET weather for {city}" if not has_weather else "⚠️ FINISH - No credentials"}
+1. If task is ALREADY COMPLETED (check Previous Steps):
+   → Use FINISH action with success message
 
-RESPOND WITH ONLY ONE OF THESE JSON FORMATS:
+2. If goal mentions "GitHub" AND "issue":
+   → Use github tool with create_issue action
+   → Extract repo name from goal (format: owner/repo)
+   → Extract issue title and body from goal
 
-Option 1 - FINISH (if task is done or Notion already succeeded):
+3. If goal mentions "weather":
+   → Use http tool to GET weather data
+   → Then decide next step based on goal
+
+4. If goal mentions "notion":
+   → Use notion tool or http POST to Notion API
+
+5. Otherwise:
+   → Analyze goal and choose appropriate tool
+
+RESPONSE FORMATS:
+
+Format 1 - FINISH (task completed):
 {{
-  "reasoning": "task completed - Notion page was already created in previous step",
+  "reasoning": "GitHub issue was created successfully in previous step",
   "action": "FINISH",
-  "final_answer": "Successfully retrieved {city} weather ({weather_temp}°C) and added to Notion database."
+  "final_answer": "Successfully created GitHub issue #{last_result.get('number') if last_result and 'number' in last_result else 'N/A'} at {last_result.get('html_url') if last_result and 'html_url' in last_result else 'unknown'}"
 }}
 
-Option 2 - GET weather (if don't have it yet):
+Format 2 - Create GitHub Issue:
 {{
-  "reasoning": "fetching {city} weather data",
+  "reasoning": "creating GitHub issue as requested in goal",
+  "action": "USE_TOOL",
+  "tool": "github",
+  "tool_action": "create_issue",
+  "parameters": {{
+    "repo": "owner/repository",
+    "title": "Issue title from goal",
+    "body": "Issue description from goal"
+  }}
+}}
+
+Format 3 - Get Weather:
+{{
+  "reasoning": "fetching weather data for city",
   "action": "USE_TOOL",
   "tool": "http",
   "tool_action": "GET",
   "parameters": {{
-    "url": "https://wttr.in/{city}?format=j1"
+    "url": "https://wttr.in/CityName?format=j1"
   }}
 }}
 
-Option 3 - POST to Notion (ONLY if have weather AND haven't succeeded yet):
-{{
-  "reasoning": "adding {city} weather to Notion database for the first time",
-  "action": "USE_TOOL",
-  "tool": "http",
-  "tool_action": "POST",
-  "parameters": {{
-    "url": "https://api.notion.com/v1/pages",
-    "headers": {{
-      "Authorization": "Bearer {notion_token}",
-      "Notion-Version": "2022-06-28",
-      "Content-Type": "application/json"
-    }},
-    "body": {{
-      "parent": {{"database_id": "{notion_db_id}"}},
-      "properties": {{
-        "Name": {{"title": [{{"text": {{"content": "{city} Weather - {weather_temp}°C"}}}}]}},
-        "Temperature": {{"number": {weather_temp or 25}}}
-      }}
-    }}
-  }}
-}}
+⚠️ CRITICAL RULES:
+- ALWAYS check "Previous Steps" first
+- If you see GitHub issue already created → FINISH immediately
+- NEVER repeat the same action twice
+- Use the tool that matches the goal (github for GitHub, http for APIs, etc.)
 
-⚠️ WARNING: If you see "NOTION PAGE CREATED SUCCESSFULLY" in Previous Steps, you MUST use FINISH. Creating duplicate pages is wrong!"""
+NOW ANALYZE THE GOAL AND RESPOND:"""
         
         response_text = ""
         try:
@@ -433,7 +371,7 @@ Option 3 - POST to Notion (ONLY if have weather AND haven't succeeded yet):
         if not tool:
             return {
                 "error": f"Tool '{tool_name}' not found",
-                "available_primitives": ["http", "data", "file"]
+                "available_tools": list(self.tools.list_all().keys())
             }
         
         print(f"   → Executing: {tool_name}.{tool_action}")
@@ -441,7 +379,7 @@ Option 3 - POST to Notion (ONLY if have weather AND haven't succeeded yet):
         result = tool.execute(tool_action, parameters, mode="real")
         
         if isinstance(result, dict) and "error" in result:
-            result["fallback_suggestion"] = "Try using http primitives directly"
+            result["fallback_suggestion"] = "Check tool parameters and try again"
         
         return result
     
@@ -453,15 +391,22 @@ Option 3 - POST to Notion (ONLY if have weather AND haven't succeeded yet):
         lines = ["Previous Steps:"]
         for entry in self.conversation_history[-5:]:  # Last 5 only
             lines.append(f"\nStep {entry['iteration']}:")
-            lines.append(f"  Action: {entry['thought']['action']}")
+            lines.append(f"  Tool: {entry['thought'].get('tool', 'N/A')}")
+            lines.append(f"  Action: {entry['thought'].get('tool_action', entry['thought']['action'])}")
             
             obs = entry['observation']
             if isinstance(obs, dict):
-                obs_str = str(obs)[:300]
+                # Highlight important results
+                if 'number' in obs and 'html_url' in obs:
+                    lines.append(f"  Result: ✅ GITHUB ISSUE CREATED - #{obs['number']} at {obs['html_url']}")
+                elif 'error' in obs:
+                    lines.append(f"  Result: ❌ Error - {str(obs['error'])[:100]}")
+                else:
+                    obs_str = str(obs)[:200]
+                    lines.append(f"  Result: {obs_str}...")
             else:
-                obs_str = str(obs)[:300]
-            
-            lines.append(f"  Result: {obs_str}...")
+                obs_str = str(obs)[:200]
+                lines.append(f"  Result: {obs_str}...")
         
         return "\n".join(lines)
     
@@ -469,6 +414,9 @@ Option 3 - POST to Notion (ONLY if have weather AND haven't succeeded yet):
         """Extract answer from history"""
         for entry in reversed(self.conversation_history):
             obs = entry.get("observation", {})
-            if isinstance(obs, dict) and obs.get("status") == 200:
-                return f"Task completed. Data: {str(obs.get('data', ''))[:200]}"
+            if isinstance(obs, dict):
+                if 'number' in obs and 'html_url' in obs:
+                    return f"Successfully created GitHub issue #{obs['number']} at {obs['html_url']}"
+                elif obs.get("status") == 200:
+                    return f"Task completed successfully. Data: {str(obs.get('data', ''))[:200]}"
         return "Task attempted"
