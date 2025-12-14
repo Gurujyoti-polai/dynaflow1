@@ -1,6 +1,12 @@
-# Add to .gitignore so it never gets committed again
-echo ".env" >> .gitignore
-echo ".env.old" >> .gitignore
+__pycache__/
+*.pyc
 .env
 .env.*
-backup_*/
+.venv/
+venv/
+node_modules/
+.idea/
+.vscode/
+.DS_Store
+
+

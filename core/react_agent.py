@@ -1,62 +1,77 @@
-# core/react_agent.py
 """
-ReAct Agent for DynaFlow
-Reasons about what to do, acts, observes results, and adapts
+ReAct Agent with Dynamic Tool System
 """
 
-from google import generativeai as genai
+from openai import OpenAI
 import os
 import json
-import httpx
-from typing import Dict, Any, List
-from datetime import datetime
 import re
+from typing import Dict, Any, List
+
+# Import the tool registry
+from tools import registry
+
 
 class ReActAgent:
     """
-    ReAct (Reason + Act) Agent that can:
-    1. Reason about what needs to be done
-    2. Take actions (API calls, data transforms)
-    3. Observe results
-    4. Adapt based on what it sees
+    ReAct Agent with dynamic tool discovery and fallback
     """
     
     def __init__(self):
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY not set")
+        # Use Ollama
+        self.client = OpenAI(
+            base_url="http://localhost:11434/v1",
+            api_key="ollama"
+        )
+        self.model = "llama3.1:8b"
+        print("🤖 Using Ollama (Local)")
         
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
-        
+        # Tool system
+        self.tools = registry
         self.conversation_history: List[Dict] = []
-        self.max_iterations = 10
+        self.max_iterations = 12
     
     def execute_workflow(self, user_goal: str) -> Dict[str, Any]:
         """
-        Execute a workflow using ReAct loop
-        
-        Args:
-            user_goal: Natural language description of what to do
-            
-        Returns:
-            Final result with execution trace
+        Execute a workflow using ReAct loop with tools
         """
         print(f"\n{'='*70}")
         print(f"🎯 Goal: {user_goal}")
         print(f"{'='*70}\n")
         
-        # Initialize conversation
         self.conversation_history = []
         iteration = 0
+        repeated_actions = {}  # Track repeated actions
         
         while iteration < self.max_iterations:
             iteration += 1
             print(f"\n--- Iteration {iteration} ---")
+
+            #  Check if we have weather data and should move to next step
+            if iteration > 1:
+                last_obs = self.conversation_history[-1].get('observation', {})
+                if isinstance(last_obs, dict) and last_obs.get('status') == 200:
+                    data = last_obs.get('data', {})
+                    if 'current_condition' in data and 'notion' in user_goal.lower():
+                        print("✅ Weather data obtained. Moving to Notion...")
+                        # Continue to let agent think about Notion
             
-            # Step 1: THINK (Reason about what to do next)
+            # THINK
             thought = self._think(user_goal)
-            print(f"💭 Thought: {thought['reasoning']}")
+            print(f"💭 Thought: {thought['reasoning'][:150]}...")
+            
+            # Check for repeated actions
+            action_key = f"{thought.get('action')}:{thought.get('tool')}:{thought.get('tool_action')}"
+            repeated_actions[action_key] = repeated_actions.get(action_key, 0) + 1
+            
+            if repeated_actions[action_key] > 2:
+                print(f"⚠️  Action repeated {repeated_actions[action_key]} times. Auto-finishing.")
+                return {
+                    "status": "success",
+                    "result": self._extract_final_answer(),
+                    "iterations": iteration,
+                    "trace": self.conversation_history
+                }
             
             # Check if done
             if thought['action'] == 'FINISH':
@@ -68,10 +83,38 @@ class ReActAgent:
                     "trace": self.conversation_history
                 }
             
-            # Step 2: ACT (Execute the action)
+            # ACT
             print(f"🔧 Action: {thought['action']}")
             observation = self._act(thought)
-            print(f"👁️  Observation: {str(observation)[:200]}...")
+            
+            # Handle errors
+            if isinstance(observation, dict):
+                if "error" in observation:
+                    print(f"❌ Error: {observation['error'][:100]}...")
+                    if "fallback_suggestion" in observation:
+                        print(f"💡 Suggestion: {observation['fallback_suggestion']}")
+                elif observation.get("status") == 401:
+                    print(f"🔒 Authentication failed - stopping retry loop")
+                    print(f"💡 Hint: Check NOTION_TOKEN and NOTION_DB_ID environment variables")
+                    return {
+                        "status": "auth_error",
+                        "result": "Authentication failed. Weather data retrieved successfully but could not add to Notion due to invalid credentials.",
+                        "iterations": iteration,
+                        "trace": self.conversation_history
+                    }
+                elif observation.get("status") == 200:
+                    data = observation.get("data", {})
+                    # Check if this is a successful Notion page creation
+                    if isinstance(data, dict) and data.get("object") == "page":
+                        print(f"✅✅✅ SUCCESS! Notion page created: {data.get('id')}")
+                        print(f"🎉 Task completed successfully!")
+                        # Force FINISH on next iteration by adding to history
+                elif observation.get("status") >= 400:
+                    print(f"⚠️  HTTP {observation.get('status')} error")
+                else:
+                    print(f"👁️  Observation: {str(observation)[:200]}...")
+            else:
+                print(f"👁️  Observation: {str(observation)[:200]}...")
             
             # Store in history
             self.conversation_history.append({
@@ -82,241 +125,350 @@ class ReActAgent:
         
         return {
             "status": "max_iterations_reached",
-            "result": "Could not complete task within iteration limit",
+            "result": self._extract_final_answer(),
             "iterations": iteration,
             "trace": self.conversation_history
         }
     
+    def _clean_json_response(self, text: str) -> str:
+        """
+        Clean LLM response to extract valid JSON
+        """
+        print(f"🧼 Cleaning input ({len(text)} chars)...")
+        
+        # Remove markdown code blocks
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+            print("   Removed ```json``` wrapper")
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+            print("   Removed ``` wrapper")
+        
+        # Find JSON object boundaries
+        start_idx = text.find('{')
+        end_idx = text.rfind('}')
+        
+        print(f"   JSON boundaries: start={start_idx}, end={end_idx}")
+        
+        if start_idx == -1 or end_idx == -1:
+            raise ValueError("No JSON object found in response")
+        
+        text = text[start_idx:end_idx+1]
+        print(f"   Extracted JSON object ({len(text)} chars)")
+        
+        # Remove trailing commas before closing braces/brackets
+        original_len = len(text)
+        text = re.sub(r',(\s*[}\]])', r'\1', text)
+        if len(text) != original_len:
+            print(f"   Removed trailing commas")
+        
+        # DON'T remove // comments - they might be part of URLs!
+        # Only remove comments that are clearly standalone (not in strings)
+        # For now, skip comment removal to avoid breaking URLs
+        
+        result = text.strip()
+        print(f"   Final cleaned ({len(result)} chars)")
+        return result
+    
+    def _extract_city_from_goal(self, goal: str) -> str:
+        """
+        Extract city name from user goal
+        Simple extraction - looks for common patterns
+        """
+        goal_lower = goal.lower()
+        
+        # Common patterns: "get X weather", "weather in X", "X weather"
+        patterns = [
+            r'(?:get|fetch|retrieve)\s+(\w+)\s+weather',
+            r'weather\s+(?:in|for|of)\s+(\w+)',
+            r'(\w+)\s+weather',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, goal_lower)
+            if match:
+                city = match.group(1).capitalize()
+                print(f"🌍 Extracted city: {city}")
+                return city
+        
+        # Default fallback
+        print(f"⚠️  Could not extract city, using Mumbai as default")
+        return "Mumbai"
+    
     def _think(self, user_goal: str) -> Dict[str, Any]:
         """
-        Reason about what to do next based on goal and history
+        Agent reasons about what to do next
         """
-        # Build context from history
         history_text = self._format_history()
+        tool_manifest = self.tools.list_manifest()
         
-        prompt = f"""You are an AI agent that can execute workflows by calling APIs and processing data.
+        # Extract city name from goal (simple extraction)
+        city = self._extract_city_from_goal(user_goal)
+        
+        # Check if we have weather data
+        has_weather = False
+        weather_data = None
+        weather_temp = None
+        has_auth_error = False
+        notion_success = False
+        
+        for entry in self.conversation_history:
+            obs = entry.get('observation', {})
+            thought = entry.get('thought', {})
+            
+            if isinstance(obs, dict):
+                # Check for weather data
+                if obs.get('status') == 200:
+                    data = obs.get('data', {})
+                    if isinstance(data, dict) and 'current_condition' in data:
+                        has_weather = True
+                        weather_data = data
+                        try:
+                            weather_temp = int(data['current_condition'][0]['temp_C'])
+                        except (KeyError, IndexError, ValueError):
+                            weather_temp = 25
+                    # Check if this was a successful Notion POST
+                    elif 'object' in data and data.get('object') == 'page':
+                        notion_success = True
+                # Check for authentication errors
+                if obs.get('status') == 401:
+                    has_auth_error = True
+        
+        # Get environment variables
+        notion_token = os.environ.get('NOTION_TOKEN', '')
+        notion_db_id = os.environ.get('NOTION_DB_ID', '')
+        
+        prompt = f"""You are an AI agent that executes workflows. You must respond with ONLY valid JSON.
 
 USER GOAL: {user_goal}
+TARGET CITY: {city}
 
 {history_text}
 
-Available Actions:
-1. API_CALL - Make an HTTP request
-   Format: {{"action": "API_CALL", "method": "GET/POST/etc", "url": "...", "headers": {{}}, "body": {{}}}}
+Available Tools:
+{tool_manifest}
 
-2. EXTRACT - Extract data from previous observation
-   Format: {{"action": "EXTRACT", "path": "key.subkey[0].value", "from_step": <iteration_number>}}
+CURRENT STATUS:
+- Have weather data: {"YES ✓" if has_weather else "NO"}
+- Weather temperature: {weather_temp if weather_temp else "N/A"}°C
+- Notion credentials: {"CONFIGURED ✓" if notion_token and notion_db_id else "MISSING ⚠️"}
+- Notion POST success: {"YES ✓✓✓ ALREADY DONE - DO NOT REPEAT!" if notion_success else "NOT YET"}
+- Previous auth error: {"YES - STOP" if has_auth_error else "NO"}
 
-3. TRANSFORM - Transform/format data
-   Format: {{"action": "TRANSFORM", "operation": "...", "data": "..."}}
+🚨 CRITICAL RULES - READ CAREFULLY:
+1. Look at "Previous Steps" above - if you see "✅ NOTION PAGE CREATED SUCCESSFULLY" → TASK IS DONE → Use FINISH action immediately
+2. NEVER POST to Notion twice - if it succeeded once, you're DONE
+3. If Notion POST failed with 401 → FINISH with error
+4. Only POST to Notion if you haven't already succeeded
 
-4. FINISH - Complete the task
-   Format: {{"action": "FINISH", "final_answer": "..."}}
+DECISION TREE:
+- Notion already succeeded? → FINISH (YOU'RE DONE!)
+- Have weather + got 401? → FINISH with error
+- Have weather + haven't tried Notion yet? → POST to Notion
+- Don't have weather? → GET weather for {city}
+- Otherwise? → FINISH
 
-Environment Variables Available:
-- OPENWEATHER_API_KEY
-- NOTION_TOKEN  
-- NOTION_DB_ID
-- GITHUB_TOKEN
+YOUR NEXT ACTION:
+{"🎯 FINISH - You already created the Notion page successfully!" if notion_success else "🔒 FINISH - Auth failed" if has_auth_error else f"📤 POST to Notion (first attempt)" if has_weather and notion_token else f"🌤️ GET weather for {city}" if not has_weather else "⚠️ FINISH - No credentials"}
 
-Think step by step:
-1. What have I done so far?
-2. What information do I have?
-3. What do I need to do next?
-4. Am I done?
+RESPOND WITH ONLY ONE OF THESE JSON FORMATS:
 
-Respond with JSON:
+Option 1 - FINISH (if task is done or Notion already succeeded):
 {{
-  "reasoning": "Step by step thinking about what to do next...",
-  "action": "API_CALL | EXTRACT | TRANSFORM | FINISH",
-  "parameters": {{...action-specific params...}},
-  "final_answer": "only if action is FINISH"
+  "reasoning": "task completed - Notion page was already created in previous step",
+  "action": "FINISH",
+  "final_answer": "Successfully retrieved {city} weather ({weather_temp}°C) and added to Notion database."
 }}
 
-Examples:
+Option 2 - GET weather (if don't have it yet):
+{{
+  "reasoning": "fetching {city} weather data",
+  "action": "USE_TOOL",
+  "tool": "http",
+  "tool_action": "GET",
+  "parameters": {{
+    "url": "https://wttr.in/{city}?format=j1"
+  }}
+}}
 
-Goal: "Get Mumbai weather and add to Notion"
-Thought 1: {{"reasoning": "Need to get weather data first", "action": "API_CALL", "parameters": {{"method": "GET", "url": "https://api.openweathermap.org/data/2.5/weather?q=Mumbai&appid={{{{OPENWEATHER_API_KEY}}}}&units=metric"}}}}
+Option 3 - POST to Notion (ONLY if have weather AND haven't succeeded yet):
+{{
+  "reasoning": "adding {city} weather to Notion database for the first time",
+  "action": "USE_TOOL",
+  "tool": "http",
+  "tool_action": "POST",
+  "parameters": {{
+    "url": "https://api.notion.com/v1/pages",
+    "headers": {{
+      "Authorization": "Bearer {notion_token}",
+      "Notion-Version": "2022-06-28",
+      "Content-Type": "application/json"
+    }},
+    "body": {{
+      "parent": {{"database_id": "{notion_db_id}"}},
+      "properties": {{
+        "Name": {{"title": [{{"text": {{"content": "{city} Weather - {weather_temp}°C"}}}}]}},
+        "Temperature": {{"number": {weather_temp or 25}}}
+      }}
+    }}
+  }}
+}}
 
-Observation 1: {{"main": {{"temp": 30}}, "weather": [{{"description": "clear"}}]}}
-
-Thought 2: {{"reasoning": "I have weather data. Now need to extract temp and description, then post to Notion", "action": "API_CALL", "parameters": {{"method": "POST", "url": "https://api.notion.com/v1/pages", "headers": {{"Authorization": "Bearer {{{{NOTION_TOKEN}}}}", "Notion-Version": "2022-06-28"}}, "body": {{"parent": {{"database_id": "{{{{NOTION_DB_ID}}}}"}}, "properties": {{"Name": {{"title": [{{"text": {{"content": "Mumbai: 30°C"}}}}]}}}}}}}}}}
-
-Observation 2: {{"id": "page-123", "url": "..."}}
-
-Thought 3: {{"reasoning": "Successfully created Notion page. Task complete.", "action": "FINISH", "final_answer": "Created Notion page with Mumbai weather (30°C, clear sky)"}}
-
-Now think about the user's goal:"""
+⚠️ WARNING: If you see "NOTION PAGE CREATED SUCCESSFULLY" in Previous Steps, you MUST use FINISH. Creating duplicate pages is wrong!"""
         
-        response = self.model.generate_content(prompt)
-        response_text = response.text.strip()
+        response_text = ""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a JSON-only AI agent. Always respond with valid JSON only. Never add explanations, markdown, or any text outside the JSON object."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.1,
+                max_tokens=2000
+            )
+            
+            response_text = response.choices[0].message.content.strip()
+            print(f"🔍 Raw response ({len(response_text)} chars):\n{response_text}\n")
+            
+            # Clean the JSON response
+            cleaned_text = self._clean_json_response(response_text)
+            print(f"🧹 Cleaned JSON ({len(cleaned_text)} chars):\n{cleaned_text}\n")
+            
+            # Parse JSON
+            thought = json.loads(cleaned_text)
+            print(f"✅ Parsed successfully: action={thought.get('action')}, tool={thought.get('tool')}\n")
+            
+            # Validate required fields
+            if "action" not in thought:
+                raise ValueError("Missing 'action' field in response")
+            
+            if thought["action"] not in ["USE_TOOL", "QUERY_TOOL", "FINISH"]:
+                raise ValueError(f"Invalid action: {thought['action']}")
+            
+            return thought
+            
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON Parse Error: {e}")
+            print(f"❌ Position: line {e.lineno}, column {e.colno}")
+            print(f"❌ Failed text ({len(response_text)} chars):\n{response_text}\n")
+            
+            # Fallback: try to extract action manually
+            if "FINISH" in response_text.upper():
+                return {
+                    "reasoning": "Parsing failed, but detected FINISH intent",
+                    "action": "FINISH",
+                    "final_answer": "Task completed with parsing issues"
+                }
+            
+            # Default fallback
+            return {
+                "reasoning": f"JSON parse error: {str(e)}. Falling back to finish.",
+                "action": "FINISH",
+                "final_answer": f"Error: Could not parse response. Raw: {response_text[:200]}"
+            }
         
-        # Parse JSON
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in response_text:
-            response_text = response_text.split("```")[1].split("```")[0].strip()
-        
-        return json.loads(response_text)
+        except Exception as e:
+            print(f"❌ Unexpected Error in _think: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "reasoning": f"Error: {str(e)}",
+                "action": "FINISH",
+                "final_answer": f"Error: {str(e)}"
+            }
     
     def _act(self, thought: Dict[str, Any]) -> Any:
-        """
-        Execute the action and return observation
-        """
+        """Execute the action"""
         action = thought['action']
-        params = thought.get('parameters', {})
         
         try:
-            if action == 'API_CALL':
-                return self._execute_api_call(params)
-            
-            elif action == 'EXTRACT':
-                return self._extract_data(params)
-            
-            elif action == 'TRANSFORM':
-                return self._transform_data(params)
-            
+            if action == 'QUERY_TOOL':
+                return self._query_tool(thought)
+            elif action == 'USE_TOOL':
+                return self._use_tool(thought)
             elif action == 'FINISH':
                 return {"status": "finished"}
-            
             else:
                 return {"error": f"Unknown action: {action}"}
-        
         except Exception as e:
             return {"error": str(e)}
     
-    def _execute_api_call(self, params: Dict) -> Any:
-        """Execute HTTP request"""
-        method = params.get('method', 'GET').upper()
-        url = params.get('url', '')
-        headers = params.get('headers', {})
-        body = params.get('body')
+    def _query_tool(self, thought: Dict[str, Any]) -> Dict[str, Any]:
+        """Get tool schema"""
+        tool_name = thought.get('tool')
         
-        # Replace environment variables
-        url = self._replace_env_vars(url)
-        headers = self._replace_env_vars_in_dict(headers)
-        body = self._replace_env_vars_in_dict(body) if body else None
+        if not tool_name:
+            return {"error": "Missing 'tool' parameter"}
         
-        print(f"   → {method} {url[:80]}...")
+        tool = self.tools.get(tool_name)
         
-        with httpx.Client(timeout=30.0) as client:
-            response = client.request(
-                method=method,
-                url=url,
-                headers=headers,
-                json=body
-            )
-            response.raise_for_status()
-            
-            try:
-                return response.json()
-            except:
-                return {"text": response.text}
+        if not tool:
+            return {
+                "error": f"Tool '{tool_name}' not found",
+                "available_tools": list(self.tools.list_all().keys())
+            }
+        
+        schema = tool.get_schema()
+        print(f"   📋 Schema for {tool_name}")
+        return schema
     
-    def _extract_data(self, params: Dict) -> Any:
-        """Extract data from previous observation"""
-        path = params.get('path', '')
-        from_step = params.get('from_step', len(self.conversation_history))
+    def _use_tool(self, thought: Dict[str, Any]) -> Any:
+        """Execute a tool"""
+        tool_name = thought.get('tool')
+        tool_action = thought.get('tool_action')
+        parameters = thought.get('parameters', {})
         
-        if from_step > len(self.conversation_history):
-            return {"error": "Invalid step reference"}
+        if not tool_name or not tool_action:
+            return {"error": "Missing tool or tool_action"}
         
-        data = self.conversation_history[from_step - 1]['observation']
+        tool = self.tools.get(tool_name)
         
-        # Navigate path
-        for part in path.split('.'):
-            if '[' in part:
-                # Handle array index: weather[0]
-                key = part.split('[')[0]
-                idx = int(part.split('[')[1].split(']')[0])
-                data = data[key][idx]
-            else:
-                data = data[part]
+        if not tool:
+            return {
+                "error": f"Tool '{tool_name}' not found",
+                "available_primitives": ["http", "data", "file"]
+            }
         
-        return data
-    
-    def _transform_data(self, params: Dict) -> Any:
-        """Transform/format data"""
-        operation = params.get('operation', '')
-        data = params.get('data', '')
+        print(f"   → Executing: {tool_name}.{tool_action}")
         
-        # Simple transformations
-        if operation == 'uppercase':
-            return data.upper()
-        elif operation == 'lowercase':
-            return data.lower()
-        elif operation == 'json_parse':
-            return json.loads(data)
-        else:
-            return data
-    
-    def _replace_env_vars(self, text: str) -> str:
-        """Replace {{VAR_NAME}} with environment variables"""
-        if not isinstance(text, str):
-            return text
+        result = tool.execute(tool_action, parameters, mode="real")
         
-        pattern = r'\{\{([A-Z_][A-Z_0-9]*)\}\}'
+        if isinstance(result, dict) and "error" in result:
+            result["fallback_suggestion"] = "Try using http primitives directly"
         
-        def replacer(match):
-            var_name = match.group(1)
-            value = os.getenv(var_name)
-            return value if value else match.group(0)
-        
-        return re.sub(pattern, replacer, text)
-    
-    def _replace_env_vars_in_dict(self, data: Any) -> Any:
-        """Recursively replace env vars in dict/list"""
-        if isinstance(data, dict):
-            return {k: self._replace_env_vars_in_dict(v) for k, v in data.items()}
-        elif isinstance(data, list):
-            return [self._replace_env_vars_in_dict(item) for item in data]
-        elif isinstance(data, str):
-            return self._replace_env_vars(data)
-        else:
-            return data
+        return result
     
     def _format_history(self) -> str:
-        """Format conversation history for prompt"""
+        """Format conversation history"""
         if not self.conversation_history:
-            return "Previous Steps: None yet - this is the first step."
+            return "Previous Steps: None yet"
         
         lines = ["Previous Steps:"]
-        for entry in self.conversation_history:
+        for entry in self.conversation_history[-5:]:  # Last 5 only
             lines.append(f"\nStep {entry['iteration']}:")
-            lines.append(f"  Thought: {entry['thought']['reasoning'][:100]}...")
             lines.append(f"  Action: {entry['thought']['action']}")
             
             obs = entry['observation']
             if isinstance(obs, dict):
-                obs_str = json.dumps(obs, indent=2)[:200]
+                obs_str = str(obs)[:300]
             else:
-                obs_str = str(obs)[:200]
+                obs_str = str(obs)[:300]
+            
             lines.append(f"  Result: {obs_str}...")
         
         return "\n".join(lines)
-
-
-# API endpoint for ReAct agent
-from fastapi import FastAPI
-from pydantic import BaseModel
-
-class ReActRequest(BaseModel):
-    goal: str
-    mode: str = "real"
-
-def add_react_endpoint(app: FastAPI):
-    """Add ReAct endpoint to existing FastAPI app"""
     
-    @app.post("/react/execute")
-    async def execute_react(req: ReActRequest):
-        """
-        Execute a workflow using ReAct agent
-        
-        Example:
-            curl -X POST http://localhost:8000/react/execute \
-              -H "Content-Type: application/json" \
-              -d '{"goal": "Get Mumbai weather and add to Notion database"}'
-        """
-        agent = ReActAgent()
-        result = agent.execute_workflow(req.goal)
-        return result
+    def _extract_final_answer(self) -> str:
+        """Extract answer from history"""
+        for entry in reversed(self.conversation_history):
+            obs = entry.get("observation", {})
+            if isinstance(obs, dict) and obs.get("status") == 200:
+                return f"Task completed. Data: {str(obs.get('data', ''))[:200]}"
+        return "Task attempted"

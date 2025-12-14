@@ -4,6 +4,8 @@ DynaFlow API - ReAct Agent Only
 Clean, simple, powerful
 """
 
+from dotenv import load_dotenv
+load_dotenv()
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Any, List, Dict
