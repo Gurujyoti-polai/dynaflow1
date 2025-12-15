@@ -54,6 +54,20 @@ class ReActAgent:
             
             # Auto-finish if all required tasks complete
             goal_lower = user_goal.lower()
+
+            if 'list' in goal_lower and 'github' in goal_lower:
+                if progress.get('github_listed'):
+                    print("🛑 GitHub repositories listed. Forcing FINISH.")
+                    return {
+                        "status": "success",
+                        "result": observation.get("data"),
+                        "iterations": iteration,
+                        "trace": self.conversation_history + [{
+                            "iteration": iteration,
+                            "thought": thought,
+                            "observation": observation
+                        }]
+                    }
             
             # Determine which tasks are needed
             needs_weather = 'weather' in goal_lower
@@ -123,7 +137,7 @@ class ReActAgent:
                 thought = self._replace_placeholders(thought)
             
             observation = self._act(thought)
-            
+
             # Handle errors and track consecutive failures
             if isinstance(observation, dict):
                 if "error" in observation or (observation.get("status", 200) >= 400):
@@ -588,6 +602,7 @@ RESPOND WITH JSON ONLY:"""
             "weather_fetched": False,
             "notion_created": False,
             "github_created": False,
+            "github_listed": False,
             "weather_data": None
         }
         
@@ -614,6 +629,8 @@ RESPOND WITH JSON ONLY:"""
                 
                 # Check GitHub - look for successful issue/PR creation
                 if tool == 'github':
+                    if obs.get('status') == 200 and isinstance(obs.get('data'), list):
+                        done['github_listed'] = True
                     # Check for issue number and URL (from our smart tool)
                     if obs.get('number') and obs.get('html_url'):
                         done['github_created'] = True
