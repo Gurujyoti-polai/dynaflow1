@@ -324,6 +324,7 @@ class GithubTool(ToolBase):
 
     def _list_repos(self, config: Dict[str, Any], token: str) -> Dict[str, Any]:
         """List repositories"""
+
         
         user = config.get("user")
         repo_type = config.get("type", "owner")

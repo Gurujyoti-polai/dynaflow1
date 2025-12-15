@@ -52,6 +52,16 @@ class ReActAgent:
             progress = self._what_is_done()
             print(f"📊 Progress: weather={progress['weather_fetched']}, notion={progress['notion_created']}, github={progress['github_created']}")
             
+            # 🚨 HARD STOP: GitHub PR already created
+            if progress.get("github_pr_created"):
+                print("🛑 PR already created — stopping further GitHub actions")
+                return {
+                    "status": "success",
+                    "result": "Pull request created successfully",
+                    "iterations": iteration,
+                    "trace": self.conversation_history
+                }
+
             # Auto-finish if all required tasks complete
             goal_lower = user_goal.lower()
 
@@ -603,6 +613,7 @@ RESPOND WITH JSON ONLY:"""
             "notion_created": False,
             "github_created": False,
             "github_listed": False,
+            "github_pr_created": False,
             "weather_data": None
         }
         
@@ -610,6 +621,7 @@ RESPOND WITH JSON ONLY:"""
             obs = entry.get('observation', {})
             thought = entry.get('thought', {})
             tool = thought.get('tool', '')
+            action = thought.get("tool_action")
             
             if isinstance(obs, dict):
                 # Check weather - either OpenWeather or wttr.in
@@ -629,6 +641,14 @@ RESPOND WITH JSON ONLY:"""
                 
                 # Check GitHub - look for successful issue/PR creation
                 if tool == 'github':
+
+                    if (
+                        action == "create_pull_request"
+                        and obs.get("status") == 200
+                        and obs.get("html_url")
+                    ):
+                        done["github_pr_created"] = True
+                        done["github_created"] = True
                     if obs.get('status') == 200 and isinstance(obs.get('data'), list):
                         done['github_listed'] = True
                     # Check for issue number and URL (from our smart tool)
