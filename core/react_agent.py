@@ -1,7 +1,3 @@
-"""
-ReAct Agent with Dynamic Tool System - COMPLETE VERSION
-"""
-
 from openai import OpenAI
 import os
 import json
@@ -50,7 +46,7 @@ class ReActAgent:
             
             # Check progress before thinking
             progress = self._what_is_done()
-            print(f"📊 Progress: weather={progress['weather_fetched']}, notion={progress['notion_created']}, github={progress['github_created']}, email={progress['email_sent']}")
+            print(f"📊 Progress: weather={progress['weather_fetched']}, notion={progress['notion_created']}, github={progress['github_created']}, email={progress['email_sent']}, telegram={progress['telegram_sent']}")
             
             # 🚨 HARD STOP: GitHub PR already created
             if progress.get("github_pr_created"):
@@ -81,7 +77,8 @@ class ReActAgent:
             needs_weather = 'weather' in goal_lower
             needs_notion = 'notion' in goal_lower
             needs_github = 'github' in goal_lower or 'issue' in goal_lower
-            needs_email = 'email' in goal_lower or 'send' in goal_lower
+            needs_email = 'email' in goal_lower or ('send' in goal_lower and 'email' in goal_lower)
+            needs_telegram = 'telegram' in goal_lower or ('send' in goal_lower and 'telegram' in goal_lower)
             
             # Check if all needed tasks are done
             all_done = True
@@ -93,8 +90,10 @@ class ReActAgent:
                 all_done = False
             if needs_email and not progress['email_sent']:
                 all_done = False
+            if needs_telegram and not progress['telegram_sent']:
+                all_done = False
             
-            if all_done and (needs_weather or needs_notion or needs_github or needs_email):
+            if all_done and (needs_weather or needs_notion or needs_github or needs_email or needs_telegram):
                 print("🎉 All required tasks completed! Auto-finishing.")
                 
                 # Build result message
@@ -107,6 +106,8 @@ class ReActAgent:
                     completed.append("created GitHub issue")
                 if progress['email_sent']:
                     completed.append("sent email")
+                if progress['telegram_sent']:
+                    completed.append("sent Telegram message")
                 
                 return {
                     "status": "success",
@@ -283,6 +284,8 @@ class ReActAgent:
         github_token = os.environ.get('GITHUB_TOKEN', 'NOT_SET')
         gmail_creds = os.environ.get('GMAIL_CREDENTIALS_PATH', 'NOT_SET')
         gmail_token = os.environ.get('GMAIL_TOKEN_PATH', 'NOT_SET')
+        telegram_bot_token = os.environ.get('TELEGRAM_BOT_TOKEN', 'NOT_SET')
+        telegram_chat_id = os.environ.get('TELEGRAM_CHAT_ID', 'NOT_SET')
         
         prompt = f"""You are an AI agent that executes workflows. You must respond with ONLY valid JSON.
 
@@ -299,6 +302,7 @@ ENVIRONMENT CONFIGURATION STATUS:
 - Notion Database ID: {'✓ Set (' + notion_db_id[:8] + '...)' if notion_db_id != 'NOT_SET' else '✗ NOT SET'}
 - GitHub Token: {'✓ Set (' + github_token[:8] + '...)' if github_token != 'NOT_SET' else '✗ NOT SET'}
 - Gmail OAuth: {'✓ Set' if gmail_creds != 'NOT_SET' and gmail_token != 'NOT_SET' else '✗ NOT SET'}
+- Telegram Bot: {'✓ Set' if telegram_bot_token != 'NOT_SET' and telegram_chat_id != 'NOT_SET' else '✗ NOT SET'}
 
 CRITICAL: If any required config is NOT SET, do not attempt to use that tool - use FINISH instead with an explanation.
 
@@ -328,6 +332,7 @@ USING DATA FROM PREVIOUS STEPS:
    - Notion: {{"action": "USE_TOOL", "tool": "notion", "tool_action": "create_page", "parameters": {{"title": "Weather Report", "properties": {{"Temperature": "31°C", "City": "Mumbai"}}}}}}
    - GitHub: {{"action": "USE_TOOL", "tool": "github", "tool_action": "create_issue", "parameters": {{"repo": "username/repo-name", "title": "Issue Title", "body": "Description"}}}}
    - Gmail: {{"action": "USE_TOOL", "tool": "gmail", "tool_action": "send_email", "parameters": {{"to": "user@example.com", "subject": "Subject", "body": "Email body"}}}}
+   - Telegram: {{"action": "USE_TOOL", "tool": "telegram", "tool_action": "send_message", "parameters": {{"text": "Message text"}}}}
 
 2. QUERY_TOOL - Get tool schema
    {{"action": "QUERY_TOOL", "reasoning": "...", "tool": "tool_name"}}
@@ -336,6 +341,11 @@ USING DATA FROM PREVIOUS STEPS:
    {{"action": "FINISH", "reasoning": "...", "final_answer": "Summary of what was accomplished or why it failed"}}
 
 🎯 WORKFLOW LOGIC:
+
+If goal = "Send message to Telegram":
+  - USE_TOOL with telegram.send_message
+  - Parameters: {{"text": "Your message here"}}
+  - The TELEGRAM_CHAT_ID is auto-injected from environment
 
 If goal = "Send email":
   - USE_TOOL with gmail.send_email
@@ -358,6 +368,7 @@ PROGRESS:
 - Weather fetched: {"YES ✓" if progress['weather_fetched'] else "NO"}
 - Notion created: {"YES ✓" if progress['notion_created'] else "NO"}
 - Email sent: {"YES ✓" if progress['email_sent'] else "NO"}
+- Telegram sent: {"YES ✓" if progress['telegram_sent'] else "NO"}
 
 FAILURES:
 {json.dumps(tool_failures, indent=2)}
@@ -366,6 +377,7 @@ NEXT STEP:
 {
     "FINISH - Too many HTTP failures" if tool_failures.get('http', 0) >= 2 and not progress['weather_fetched']
     else "FINISH - Weather done, Notion failed" if progress['weather_fetched'] and tool_failures.get('notion', 0) >= 2
+    else "Send Telegram message" if 'telegram' in user_goal.lower() and not progress['telegram_sent']
     else "Send email with gmail tool" if 'email' in user_goal.lower() and not progress['email_sent']
     else "Try wttr.in for weather" if tool_failures.get('http', 0) >= 1 and not progress['weather_fetched']
     else "Fetch weather" if not progress['weather_fetched']
@@ -570,6 +582,7 @@ RESPOND WITH JSON ONLY:"""
             "github_listed": False,
             "github_pr_created": False,
             "email_sent": False,
+            "telegram_sent": False,
             "weather_data": None
         }
         
@@ -620,6 +633,12 @@ RESPOND WITH JSON ONLY:"""
                     if obs.get('status') == 200 and obs.get('message'):
                         done['email_sent'] = True
                         print(f"   ✅ Email sent successfully")
+                
+                # Check Telegram - look for successful message send
+                if tool == 'telegram' and action == 'send_message':
+                    if obs.get('status') == 200 and obs.get('ok'):
+                        done['telegram_sent'] = True
+                        print(f"   ✅ Telegram message sent successfully")
         
         return done
     
