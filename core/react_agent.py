@@ -1,5 +1,5 @@
 """
-ReAct Agent with Dynamic Tool System - FIXED
+ReAct Agent with Dynamic Tool System - COMPLETE VERSION
 """
 
 from openai import OpenAI
@@ -50,7 +50,7 @@ class ReActAgent:
             
             # Check progress before thinking
             progress = self._what_is_done()
-            print(f"📊 Progress: weather={progress['weather_fetched']}, notion={progress['notion_created']}, github={progress['github_created']}")
+            print(f"📊 Progress: weather={progress['weather_fetched']}, notion={progress['notion_created']}, github={progress['github_created']}, email={progress['email_sent']}")
             
             # 🚨 HARD STOP: GitHub PR already created
             if progress.get("github_pr_created"):
@@ -68,21 +68,20 @@ class ReActAgent:
             if 'list' in goal_lower and 'github' in goal_lower:
                 if progress.get('github_listed'):
                     print("🛑 GitHub repositories listed. Forcing FINISH.")
+                    # Get the last observation
+                    last_obs = self.conversation_history[-1].get('observation', {}) if self.conversation_history else {}
                     return {
                         "status": "success",
-                        "result": observation.get("data"),
+                        "result": last_obs.get("data", "Repositories listed"),
                         "iterations": iteration,
-                        "trace": self.conversation_history + [{
-                            "iteration": iteration,
-                            "thought": thought,
-                            "observation": observation
-                        }]
+                        "trace": self.conversation_history
                     }
             
             # Determine which tasks are needed
             needs_weather = 'weather' in goal_lower
             needs_notion = 'notion' in goal_lower
             needs_github = 'github' in goal_lower or 'issue' in goal_lower
+            needs_email = 'email' in goal_lower or 'send' in goal_lower
             
             # Check if all needed tasks are done
             all_done = True
@@ -92,8 +91,10 @@ class ReActAgent:
                 all_done = False
             if needs_github and not progress['github_created']:
                 all_done = False
+            if needs_email and not progress['email_sent']:
+                all_done = False
             
-            if all_done and (needs_weather or needs_notion or needs_github):
+            if all_done and (needs_weather or needs_notion or needs_github or needs_email):
                 print("🎉 All required tasks completed! Auto-finishing.")
                 
                 # Build result message
@@ -104,6 +105,8 @@ class ReActAgent:
                     completed.append("created Notion page")
                 if progress['github_created']:
                     completed.append("created GitHub issue")
+                if progress['email_sent']:
+                    completed.append("sent email")
                 
                 return {
                     "status": "success",
@@ -278,6 +281,8 @@ class ReActAgent:
         notion_token = os.environ.get('NOTION_TOKEN', 'NOT_SET')
         notion_db_id = os.environ.get('NOTION_DB_ID', 'NOT_SET')
         github_token = os.environ.get('GITHUB_TOKEN', 'NOT_SET')
+        gmail_creds = os.environ.get('GMAIL_CREDENTIALS_PATH', 'NOT_SET')
+        gmail_token = os.environ.get('GMAIL_TOKEN_PATH', 'NOT_SET')
         
         prompt = f"""You are an AI agent that executes workflows. You must respond with ONLY valid JSON.
 
@@ -293,6 +298,7 @@ ENVIRONMENT CONFIGURATION STATUS:
 - Notion Token: {'✓ Set (' + notion_token[:8] + '...)' if notion_token != 'NOT_SET' else '✗ NOT SET'}
 - Notion Database ID: {'✓ Set (' + notion_db_id[:8] + '...)' if notion_db_id != 'NOT_SET' else '✗ NOT SET'}
 - GitHub Token: {'✓ Set (' + github_token[:8] + '...)' if github_token != 'NOT_SET' else '✗ NOT SET'}
+- Gmail OAuth: {'✓ Set' if gmail_creds != 'NOT_SET' and gmail_token != 'NOT_SET' else '✗ NOT SET'}
 
 CRITICAL: If any required config is NOT SET, do not attempt to use that tool - use FINISH instead with an explanation.
 
@@ -321,6 +327,7 @@ USING DATA FROM PREVIOUS STEPS:
    - Weather: {{"action": "USE_TOOL", "tool": "http", "tool_action": "GET", "parameters": {{"url": "https://wttr.in/Mumbai?format=j1"}}}}
    - Notion: {{"action": "USE_TOOL", "tool": "notion", "tool_action": "create_page", "parameters": {{"title": "Weather Report", "properties": {{"Temperature": "31°C", "City": "Mumbai"}}}}}}
    - GitHub: {{"action": "USE_TOOL", "tool": "github", "tool_action": "create_issue", "parameters": {{"repo": "username/repo-name", "title": "Issue Title", "body": "Description"}}}}
+   - Gmail: {{"action": "USE_TOOL", "tool": "gmail", "tool_action": "send_email", "parameters": {{"to": "user@example.com", "subject": "Subject", "body": "Email body"}}}}
 
 2. QUERY_TOOL - Get tool schema
    {{"action": "QUERY_TOOL", "reasoning": "...", "tool": "tool_name"}}
@@ -329,6 +336,11 @@ USING DATA FROM PREVIOUS STEPS:
    {{"action": "FINISH", "reasoning": "...", "final_answer": "Summary of what was accomplished or why it failed"}}
 
 🎯 WORKFLOW LOGIC:
+
+If goal = "Send email":
+  - USE_TOOL with gmail.send_email
+  - Parameters: {{"to": "email@example.com", "subject": "Subject", "body": "Message"}}
+  - DO NOT use HTTP or SMTP - use the gmail tool!
 
 If goal = "Get weather and add to Notion":
   Step 1: Fetch weather using wttr.in (no API key needed)
@@ -345,6 +357,7 @@ If goal = "Get weather and add to Notion":
 PROGRESS:
 - Weather fetched: {"YES ✓" if progress['weather_fetched'] else "NO"}
 - Notion created: {"YES ✓" if progress['notion_created'] else "NO"}
+- Email sent: {"YES ✓" if progress['email_sent'] else "NO"}
 
 FAILURES:
 {json.dumps(tool_failures, indent=2)}
@@ -353,6 +366,7 @@ NEXT STEP:
 {
     "FINISH - Too many HTTP failures" if tool_failures.get('http', 0) >= 2 and not progress['weather_fetched']
     else "FINISH - Weather done, Notion failed" if progress['weather_fetched'] and tool_failures.get('notion', 0) >= 2
+    else "Send email with gmail tool" if 'email' in user_goal.lower() and not progress['email_sent']
     else "Try wttr.in for weather" if tool_failures.get('http', 0) >= 1 and not progress['weather_fetched']
     else "Fetch weather" if not progress['weather_fetched']
     else "Add to Notion" if progress['weather_fetched'] and not progress['notion_created']
@@ -536,6 +550,119 @@ RESPOND WITH JSON ONLY:"""
         
         return "\n".join(lines)
     
+    def _extract_final_answer(self) -> str:
+        """Extract answer from history"""
+        for entry in reversed(self.conversation_history):
+            obs = entry.get("observation", {})
+            if isinstance(obs, dict):
+                if 'number' in obs and 'html_url' in obs:
+                    return f"Successfully created GitHub issue #{obs['number']} at {obs['html_url']}"
+                elif obs.get("status") == 200:
+                    return f"Task completed successfully. Data: {str(obs.get('data', ''))[:200]}"
+        return "Task attempted but no successful completion detected"
+    
+    def _what_is_done(self) -> Dict[str, bool]:
+        """Check what has been accomplished"""
+        done = {
+            "weather_fetched": False,
+            "notion_created": False,
+            "github_created": False,
+            "github_listed": False,
+            "github_pr_created": False,
+            "email_sent": False,
+            "weather_data": None
+        }
+        
+        for entry in self.conversation_history:
+            obs = entry.get('observation', {})
+            thought = entry.get('thought', {})
+            tool = thought.get('tool', '')
+            action = thought.get("tool_action")
+            
+            if isinstance(obs, dict):
+                # Check weather - either OpenWeather or wttr.in
+                if obs.get('status') == 200 and tool == 'http':
+                    data = obs.get('data', {})
+                    # OpenWeather format or wttr.in
+                    if 'current_condition' in str(data) or 'main' in data or 'weather' in data:
+                        done['weather_fetched'] = True
+                        done['weather_data'] = data
+                
+                # Check Notion - look for successful page creation
+                if obs.get('status') == 200 and tool == 'notion':
+                    # Check for page_id or url in response
+                    if obs.get('page_id') or obs.get('url') or 'message' in obs:
+                        done['notion_created'] = True
+                        print(f"   ✅ Notion page created: {obs.get('url', 'Success')}")
+                
+                # Check GitHub - look for successful issue/PR creation
+                if tool == 'github':
+                    if (
+                        action == "create_pull_request"
+                        and obs.get("status") == 200
+                        and obs.get("html_url")
+                    ):
+                        done["github_pr_created"] = True
+                        done["github_created"] = True
+                    if obs.get('status') == 200 and isinstance(obs.get('data'), list):
+                        done['github_listed'] = True
+                    # Check for issue number and URL (from our smart tool)
+                    if obs.get('number') and obs.get('html_url'):
+                        done['github_created'] = True
+                        print(f"   ✅ GitHub issue #{obs.get('number')} created: {obs.get('html_url')}")
+                    # Also check raw data structure (from original tool)
+                    elif 'number' in obs and 'html_url' in obs:
+                        done['github_created'] = True
+                        print(f"   ✅ GitHub issue #{obs.get('number')} created")
+                
+                # Check Gmail - look for successful email send
+                if tool == 'gmail' and action == 'send_email':
+                    if obs.get('status') == 200 and obs.get('message'):
+                        done['email_sent'] = True
+                        print(f"   ✅ Email sent successfully")
+        
+        return done
+    
+    def _extract_available_data(self) -> Dict[str, Any]:
+        """Extract data from previous steps that can be used"""
+        data = {
+            "weather": None,
+            "notion_url": None,
+            "github_url": None
+        }
+        
+        for entry in self.conversation_history:
+            obs = entry.get('observation', {})
+            thought = entry.get('thought', {})
+            
+            if isinstance(obs, dict) and obs.get('status') == 200:
+                tool = thought.get('tool', '')
+                
+                # Extract weather data
+                if tool == 'http':
+                    raw_data = obs.get('data', {})
+                    if 'current_condition' in str(raw_data):
+                        try:
+                            current = raw_data.get('current_condition', [{}])[0]
+                            data['weather'] = {
+                                'temperature': current.get('temp_C', ''),
+                                'condition': current.get('weatherDesc', [{}])[0].get('value', ''),
+                                'humidity': current.get('humidity', ''),
+                                'feels_like': current.get('FeelsLikeC', '')
+                            }
+                        except:
+                            pass
+                
+                # Extract Notion URL
+                elif tool == 'notion':
+                    data['notion_url'] = obs.get('url', '')
+                
+                # Extract GitHub URL
+                elif tool == 'github':
+                    data['github_url'] = obs.get('html_url', '')
+        
+        return data
+    
     def _replace_placeholders(self, thought: Dict[str, Any]) -> Dict[str, Any]:
         """
         Automatically replace placeholder variables with actual values from history
@@ -594,110 +721,3 @@ RESPOND WITH JSON ONLY:"""
         thought['parameters'] = replace_in_dict(params)
         
         return thought
-    
-    def _extract_final_answer(self) -> str:
-        """Extract answer from history"""
-        for entry in reversed(self.conversation_history):
-            obs = entry.get("observation", {})
-            if isinstance(obs, dict):
-                if 'number' in obs and 'html_url' in obs:
-                    return f"Successfully created GitHub issue #{obs['number']} at {obs['html_url']}"
-                elif obs.get("status") == 200:
-                    return f"Task completed successfully. Data: {str(obs.get('data', ''))[:200]}"
-        return "Task attempted but no successful completion detected"
-    
-    def _what_is_done(self) -> Dict[str, bool]:
-        """Check what has been accomplished"""
-        done = {
-            "weather_fetched": False,
-            "notion_created": False,
-            "github_created": False,
-            "github_listed": False,
-            "github_pr_created": False,
-            "weather_data": None
-        }
-        
-        for entry in self.conversation_history:
-            obs = entry.get('observation', {})
-            thought = entry.get('thought', {})
-            tool = thought.get('tool', '')
-            action = thought.get("tool_action")
-            
-            if isinstance(obs, dict):
-                # Check weather - either OpenWeather or wttr.in
-                if obs.get('status') == 200 and tool == 'http':
-                    data = obs.get('data', {})
-                    # OpenWeather format or wttr.in
-                    if 'current_condition' in str(data) or 'main' in data or 'weather' in data:
-                        done['weather_fetched'] = True
-                        done['weather_data'] = data
-                
-                # Check Notion - look for successful page creation
-                if obs.get('status') == 200 and tool == 'notion':
-                    # Check for page_id or url in response
-                    if obs.get('page_id') or obs.get('url') or 'message' in obs:
-                        done['notion_created'] = True
-                        print(f"   ✅ Notion page created: {obs.get('url', 'Success')}")
-                
-                # Check GitHub - look for successful issue/PR creation
-                if tool == 'github':
-
-                    if (
-                        action == "create_pull_request"
-                        and obs.get("status") == 200
-                        and obs.get("html_url")
-                    ):
-                        done["github_pr_created"] = True
-                        done["github_created"] = True
-                    if obs.get('status') == 200 and isinstance(obs.get('data'), list):
-                        done['github_listed'] = True
-                    # Check for issue number and URL (from our smart tool)
-                    if obs.get('number') and obs.get('html_url'):
-                        done['github_created'] = True
-                        print(f"   ✅ GitHub issue #{obs.get('number')} created: {obs.get('html_url')}")
-                    # Also check raw data structure (from original tool)
-                    elif 'number' in obs and 'html_url' in obs:
-                        done['github_created'] = True
-                        print(f"   ✅ GitHub issue #{obs.get('number')} created")
-        
-        return done
-    
-    def _extract_available_data(self) -> Dict[str, Any]:
-        """Extract data from previous steps that can be used"""
-        data = {
-            "weather": None,
-            "notion_url": None,
-            "github_url": None
-        }
-        
-        for entry in self.conversation_history:
-            obs = entry.get('observation', {})
-            thought = entry.get('thought', {})
-            
-            if isinstance(obs, dict) and obs.get('status') == 200:
-                tool = thought.get('tool', '')
-                
-                # Extract weather data
-                if tool == 'http':
-                    raw_data = obs.get('data', {})
-                    if 'current_condition' in str(raw_data):
-                        try:
-                            current = raw_data.get('current_condition', [{}])[0]
-                            data['weather'] = {
-                                'temperature': current.get('temp_C', ''),
-                                'condition': current.get('weatherDesc', [{}])[0].get('value', ''),
-                                'humidity': current.get('humidity', ''),
-                                'feels_like': current.get('FeelsLikeC', '')
-                            }
-                        except:
-                            pass
-                
-                # Extract Notion URL
-                elif tool == 'notion':
-                    data['notion_url'] = obs.get('url', '')
-                
-                # Extract GitHub URL
-                elif tool == 'github':
-                    data['github_url'] = obs.get('html_url', '')
-        
-        return data

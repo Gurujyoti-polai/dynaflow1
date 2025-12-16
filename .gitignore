@@ -8,6 +8,8 @@ node_modules/
 .idea/
 .vscode/
 .DS_Store
+gmail_credentials.json
+gmail_token.pickle
 
 
 data/workflows.db

@@ -49,6 +49,12 @@ class ToolRegistry:
         except Exception as e:
             print(f"⚠️  Failed to load GithubTool: {e}")
 
+        try:
+            from tools.integrations.gmail import GmailTool
+            self.register(GmailTool())
+        except Exception as e:
+            print(f"⚠️  Failed to load GmailTool: {e}")
+
     def get(self, name: str) -> Optional[ToolBase]:
         """Get tool by name"""
         return self._tools.get(name)
