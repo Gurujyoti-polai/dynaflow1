@@ -46,7 +46,7 @@ class ReActAgent:
             
             # Check progress before thinking
             progress = self._what_is_done()
-            print(f"📊 Progress: weather={progress['weather_fetched']}, notion={progress['notion_created']}, github={progress['github_created']}, email={progress['email_sent']}, telegram={progress['telegram_sent']}")
+            print(f"📊 Progress: weather={progress['weather_fetched']}, notion={progress['notion_created']}, github={progress['github_created']}, email={progress['email_sent']}, telegram={progress['telegram_sent']}, excel={progress['excel_created']}")
             
             # 🚨 HARD STOP: GitHub PR already created
             if progress.get("github_pr_created"):
@@ -79,6 +79,7 @@ class ReActAgent:
             needs_github = 'github' in goal_lower or 'issue' in goal_lower
             needs_email = 'email' in goal_lower or ('send' in goal_lower and 'email' in goal_lower)
             needs_telegram = 'telegram' in goal_lower or ('send' in goal_lower and 'telegram' in goal_lower)
+            needs_excel = 'excel' in goal_lower or 'spreadsheet' in goal_lower or '.xlsx' in goal_lower
             
             # Check if all needed tasks are done
             all_done = True
@@ -92,8 +93,10 @@ class ReActAgent:
                 all_done = False
             if needs_telegram and not progress['telegram_sent']:
                 all_done = False
+            if needs_excel and not progress['excel_created']:
+                all_done = False
             
-            if all_done and (needs_weather or needs_notion or needs_github or needs_email or needs_telegram):
+            if all_done and (needs_weather or needs_notion or needs_github or needs_email or needs_telegram or needs_excel):
                 print("🎉 All required tasks completed! Auto-finishing.")
                 
                 # Build result message
@@ -108,6 +111,8 @@ class ReActAgent:
                     completed.append("sent email")
                 if progress['telegram_sent']:
                     completed.append("sent Telegram message")
+                if progress['excel_created']:
+                    completed.append("created Excel file")
                 
                 return {
                     "status": "success",
@@ -286,6 +291,7 @@ class ReActAgent:
         gmail_token = os.environ.get('GMAIL_TOKEN_PATH', 'NOT_SET')
         telegram_bot_token = os.environ.get('TELEGRAM_BOT_TOKEN', 'NOT_SET')
         telegram_chat_id = os.environ.get('TELEGRAM_CHAT_ID', 'NOT_SET')
+        excel_output_dir = os.environ.get('EXCEL_OUTPUT_DIR', 'NOT_SET')
         
         prompt = f"""You are an AI agent that executes workflows. You must respond with ONLY valid JSON.
 
@@ -303,6 +309,7 @@ ENVIRONMENT CONFIGURATION STATUS:
 - GitHub Token: {'✓ Set (' + github_token[:8] + '...)' if github_token != 'NOT_SET' else '✗ NOT SET'}
 - Gmail OAuth: {'✓ Set' if gmail_creds != 'NOT_SET' and gmail_token != 'NOT_SET' else '✗ NOT SET'}
 - Telegram Bot: {'✓ Set' if telegram_bot_token != 'NOT_SET' and telegram_chat_id != 'NOT_SET' else '✗ NOT SET'}
+- Excel Output: {'✓ Set' if excel_output_dir != 'NOT_SET' else '✗ NOT SET (will use ./output)'}
 
 CRITICAL: If any required config is NOT SET, do not attempt to use that tool - use FINISH instead with an explanation.
 
@@ -333,6 +340,7 @@ USING DATA FROM PREVIOUS STEPS:
    - GitHub: {{"action": "USE_TOOL", "tool": "github", "tool_action": "create_issue", "parameters": {{"repo": "username/repo-name", "title": "Issue Title", "body": "Description"}}}}
    - Gmail: {{"action": "USE_TOOL", "tool": "gmail", "tool_action": "send_email", "parameters": {{"to": "user@example.com", "subject": "Subject", "body": "Email body"}}}}
    - Telegram: {{"action": "USE_TOOL", "tool": "telegram", "tool_action": "send_message", "parameters": {{"text": "Message text"}}}}
+   - Excel: {{"action": "USE_TOOL", "tool": "excel", "tool_action": "create_spreadsheet", "parameters": {{"filename": "report.xlsx", "data": [{{"Name": "John", "Age": 30}}]}}}}
 
 2. QUERY_TOOL - Get tool schema
    {{"action": "QUERY_TOOL", "reasoning": "...", "tool": "tool_name"}}
@@ -352,6 +360,12 @@ If goal = "Send email":
   - Parameters: {{"to": "email@example.com", "subject": "Subject", "body": "Message"}}
   - DO NOT use HTTP or SMTP - use the gmail tool!
 
+If goal = "Create Excel file" or "Export to Excel":
+  - USE_TOOL with excel.create_spreadsheet
+  - Parameters: {{"filename": "report.xlsx", "data": [list of dicts with your data]}}
+  - The EXCEL_OUTPUT_DIR is auto-injected from environment (defaults to ./output)
+  - Data should be list of dictionaries where keys become column headers
+
 If goal = "Get weather and add to Notion":
   Step 1: Fetch weather using wttr.in (no API key needed)
     - USE_TOOL with http.GET: https://wttr.in/Mumbai?format=j1
@@ -369,6 +383,7 @@ PROGRESS:
 - Notion created: {"YES ✓" if progress['notion_created'] else "NO"}
 - Email sent: {"YES ✓" if progress['email_sent'] else "NO"}
 - Telegram sent: {"YES ✓" if progress['telegram_sent'] else "NO"}
+- Excel created: {"YES ✓" if progress['excel_created'] else "NO"}
 
 FAILURES:
 {json.dumps(tool_failures, indent=2)}
@@ -379,6 +394,7 @@ NEXT STEP:
     else "FINISH - Weather done, Notion failed" if progress['weather_fetched'] and tool_failures.get('notion', 0) >= 2
     else "Send Telegram message" if 'telegram' in user_goal.lower() and not progress['telegram_sent']
     else "Send email with gmail tool" if 'email' in user_goal.lower() and not progress['email_sent']
+    else "Create Excel file" if ('excel' in user_goal.lower() or 'spreadsheet' in user_goal.lower()) and not progress['excel_created']
     else "Try wttr.in for weather" if tool_failures.get('http', 0) >= 1 and not progress['weather_fetched']
     else "Fetch weather" if not progress['weather_fetched']
     else "Add to Notion" if progress['weather_fetched'] and not progress['notion_created']
@@ -583,6 +599,7 @@ RESPOND WITH JSON ONLY:"""
             "github_pr_created": False,
             "email_sent": False,
             "telegram_sent": False,
+            "excel_created": False,
             "weather_data": None
         }
         
@@ -639,6 +656,12 @@ RESPOND WITH JSON ONLY:"""
                     if obs.get('status') == 200 and obs.get('ok'):
                         done['telegram_sent'] = True
                         print(f"   ✅ Telegram message sent successfully")
+                
+                # Check Excel - look for successful file creation
+                if tool == 'excel' and action == 'create_spreadsheet':
+                    if obs.get('status') == 200 and obs.get('filepath'):
+                        done['excel_created'] = True
+                        print(f"   ✅ Excel file created: {obs.get('filepath')}")
         
         return done
     
